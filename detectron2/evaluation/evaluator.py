@@ -10,7 +10,7 @@ from torch import nn
 
 from detectron2.utils.comm import get_world_size, is_main_process
 from detectron2.utils.logger import log_every_n_seconds
-
+from collections import defaultdict
 
 class DatasetEvaluator:
     """
@@ -123,6 +123,8 @@ def inference_on_dataset(
     Returns:
         The return value of `evaluator.evaluate()`
     """
+    inference_results = []
+    proposal_results = []
     num_devices = get_world_size()
     logger = logging.getLogger(__name__)
     logger.info("Start inference on {} batches".format(len(data_loader)))
@@ -147,6 +149,10 @@ def inference_on_dataset(
 
         start_data_time = time.perf_counter()
         for idx, inputs in enumerate(data_loader):
+            """
+            inputs is a list of dict, each dict has "file_name", "image_id", "height", "width", "image" (tensor)
+            """
+            image_id = inputs[0]['image_id']
             total_data_time += time.perf_counter() - start_data_time
             if idx == num_warmup:
                 start_time = time.perf_counter()
@@ -156,12 +162,33 @@ def inference_on_dataset(
 
             start_compute_time = time.perf_counter()
             outputs = model(inputs)
+
+            # print(outputs)
+            fields = outputs[0]['instances']._fields
+
+            # intermediate proposals
+            proposals = model.proposals[0]
+            proposal_results.append({
+                "num_instances": len(proposals),
+                "proposal_boxes": proposals._fields['proposal_boxes'].tensor.tolist(),
+                "objectness_logits": proposals._fields['objectness_logits'].tolist()
+            })
+
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             total_compute_time += time.perf_counter() - start_compute_time
 
             start_eval_time = time.perf_counter()
-            evaluator.process(inputs, outputs)
+
+            eval_result = evaluator.process(inputs, outputs)
+            inference_results.append({
+                "image_id": image_id,
+                "eval_result": eval_result,
+                "pred_boxes": fields['pred_boxes'].tensor.tolist(),
+                "scores": fields['scores'].tolist(),
+                "pred_classes": fields['pred_classes'].tolist(),
+            })
+
             total_eval_time += time.perf_counter() - start_eval_time
 
             iters_after_start = idx + 1 - num_warmup * int(idx >= num_warmup)
@@ -206,6 +233,8 @@ def inference_on_dataset(
     # Replace it by an empty dict instead to make it easier for downstream code to handle
     if results is None:
         results = {}
+    results["inference_results"] = inference_results
+    results["proposal_results"] = proposal_results
     return results
 
 
